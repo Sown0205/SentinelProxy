@@ -71,9 +71,10 @@ class ProxyEngine:
         # Ensure directories exist
         self._config.ensure_directories()
 
-        # Print banner if not in quiet mode
+        # Print banner if not in quiet mode (show actual proxy mode)
         if sys.stdout.isatty():
-            print_banner()
+            mode_str = "Forward" if self._config.forward_mode else "Reverse"
+            print_banner(mode=mode_str)
 
         log.info("Starting SentinelProxy")
 
