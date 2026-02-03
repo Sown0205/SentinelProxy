@@ -28,6 +28,13 @@ class ProxyConfig:
     filter_path: Optional[str] = None
     min_latency: Optional[int] = None
 
+    # CORS Header Rewriting
+    cors_rewrite: bool = False
+    cors_origin: Optional[str] = None
+
+    # Proxy Mode
+    forward_mode: bool = False  # True = forward proxy, False = reverse proxy
+
     @property
     def listen_address(self) -> str:
         """Get full listen address."""
@@ -37,10 +44,12 @@ class ProxyConfig:
         """Validate configuration and return list of errors."""
         errors = []
 
-        if not self.target:
-            errors.append("Target URL is required")
-        elif not self.target.startswith(("http://", "https://")):
-            errors.append("Target must be a valid HTTP/HTTPS URL")
+        # Target is required only in reverse proxy mode
+        if not self.forward_mode:
+            if not self.target:
+                errors.append("Target URL is required (or use --forward for forward proxy mode)")
+            elif not self.target.startswith(("http://", "https://")):
+                errors.append("Target must be a valid HTTP/HTTPS URL")
 
         if self.listen_port < 1 or self.listen_port > 65535:
             errors.append("Listen port must be between 1 and 65535")

@@ -77,13 +77,22 @@ class ProxyEngine:
 
         log.info("Starting SentinelProxy")
 
-        # Parse target URL
-        parsed_target = urlparse(self._config.target)
-        target_host = parsed_target.netloc or parsed_target.path
-        target_scheme = parsed_target.scheme or "https"
-
-        log.info(f"Target: {target_scheme}://{target_host}")
-        log.info(f"Listening on {self._config.listen_address}")
+        # Determine proxy mode and parse target if needed
+        if self._config.forward_mode:
+            log.info("Mode: Forward proxy")
+            log.info(f"Listening on {self._config.listen_address}")
+            log.info("Configure your browser to use HTTP/HTTPS proxy: "
+                     f"{self._config.listen_host}:{self._config.listen_port}")
+            target_host = None
+            target_scheme = None
+        else:
+            # Parse target URL for reverse proxy mode
+            parsed_target = urlparse(self._config.target)
+            target_host = parsed_target.netloc or parsed_target.path
+            target_scheme = parsed_target.scheme or "https"
+            log.info("Mode: Reverse proxy")
+            log.info(f"Target: {target_scheme}://{target_host}")
+            log.info(f"Listening on {self._config.listen_address}")
 
         # Start traffic logger
         self._traffic_logger = TrafficLogger(self._config.log_dir)
@@ -107,6 +116,15 @@ class ProxyEngine:
             mode_str = "table mode" if self._config.table_mode else "standard mode"
             log.info(f"Live tracing enabled ({mode_str})")
 
+        # Log CORS rewriting status
+        if self._config.cors_rewrite:
+            if self._config.cors_origin:
+                log.info(f"CORS header rewriting enabled (origin: {self._config.cors_origin})")
+            elif self._config.forward_mode:
+                log.info("CORS header rewriting enabled (dynamic origin per request)")
+            else:
+                log.info(f"CORS header rewriting enabled (origin: {target_scheme}://{target_host})")
+
         # Run the proxy
         try:
             asyncio.run(self._run_proxy(target_host, target_scheme))
@@ -117,20 +135,31 @@ class ProxyEngine:
 
         return 0
 
-    async def _run_proxy(self, target_host: str, target_scheme: str) -> None:
+    async def _run_proxy(
+        self, target_host: Optional[str] = None, target_scheme: Optional[str] = None
+    ) -> None:
         """Run the mitmproxy instance.
 
         Args:
-            target_host: Target server host
-            target_scheme: Target server scheme (http/https)
+            target_host: Target server host (None for forward proxy mode)
+            target_scheme: Target server scheme (None for forward proxy mode)
         """
-        # Configure mitmproxy options
-        opts = options.Options(
-            listen_host=self._config.listen_host,
-            listen_port=self._config.listen_port,
-            mode=[f"reverse:{target_scheme}://{target_host}/"],
-            ssl_insecure=False,  # Verify upstream certificates
-        )
+        # Configure mitmproxy options based on mode
+        if self._config.forward_mode:
+            # Forward proxy mode - regular proxy, no target specification
+            opts = options.Options(
+                listen_host=self._config.listen_host,
+                listen_port=self._config.listen_port,
+                ssl_insecure=False,
+            )
+        else:
+            # Reverse proxy mode - specify target
+            opts = options.Options(
+                listen_host=self._config.listen_host,
+                listen_port=self._config.listen_port,
+                mode=[f"reverse:{target_scheme}://{target_host}/"],
+                ssl_insecure=False,
+            )
 
         # Set confdir if custom cert dir specified
         if self._config.cert_dir != Path("certs"):
@@ -141,6 +170,7 @@ class ProxyEngine:
 
         # Create and register our addon
         addon = SentinelAddon(
+            config=self._config,
             traffic_logger=self._traffic_logger,
             live_display=self._live_display,
             trace_enabled=self._config.trace,
@@ -178,9 +208,9 @@ class ProxyEngine:
         # Print session summary
         if stats:
             log.info("Session summary:")
-            log.info(f"       Requests: {stats.get('requests', 0)}")
-            log.info(f"       Errors:   {stats.get('errors', 0)}")
-            log.info(f"       Duration: {stats.get('duration', '00:00:00')}")
+            log.info(f"Requests: {stats.get('requests', 0)}")
+            log.info(f"Errors:   {stats.get('errors', 0)}")
+            log.info(f"Duration: {stats.get('duration', '00:00:00')}")
 
         log.info("Goodbye.")
 
