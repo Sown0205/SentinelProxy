@@ -38,9 +38,16 @@ def main(ctx: click.Context, version: bool) -> None:
 )
 @click.option(
     "--target",
-    required=True,
-    help="Upstream target server URL",
+    default=None,
+    help="Upstream target URL (required for reverse proxy mode)",
     metavar="URL",
+)
+@click.option(
+    "--forward",
+    "forward_mode",
+    is_flag=True,
+    default=False,
+    help="Run as forward proxy (configure browser proxy settings to use)",
 )
 @click.option(
     "--cert-dir",
@@ -103,9 +110,23 @@ def main(ctx: click.Context, version: bool) -> None:
     help="Show only requests slower than N ms",
     metavar="MS",
 )
+@click.option(
+    "--cors-rewrite",
+    is_flag=True,
+    default=False,
+    help="Rewrite Origin/Referer headers to bypass CORS restrictions",
+)
+@click.option(
+    "--cors-origin",
+    type=str,
+    default=None,
+    help="Custom origin for CORS rewriting (defaults to target origin)",
+    metavar="URL",
+)
 def start(
     listen: str,
-    target: str,
+    target: Optional[str],
+    forward_mode: bool,
     cert_dir: Path,
     log_dir: Path,
     trace: bool,
@@ -116,19 +137,40 @@ def start(
     filter_host: Optional[str],
     filter_path: Optional[str],
     min_latency: Optional[int],
+    cors_rewrite: bool,
+    cors_origin: Optional[str],
 ) -> None:
-    """Start the reverse proxy.
+    """Start the proxy server.
 
     Examples:
 
-        sentinelproxy start --target https://api.example.com
+    \b
+    Reverse proxy mode (requires --target):
+      sentinelproxy start --target https://api.example.com
+      sentinelproxy start --target https://api.example.com --trace
+      sentinelproxy start --target https://api.example.com --cors-rewrite
 
-        sentinelproxy start --listen 8080 --target https://api.example.com --trace
+    \b
+    Forward proxy mode (captures all traffic):
+      sentinelproxy start --forward --trace
+      sentinelproxy start --forward --trace --cors-rewrite
 
-        sentinelproxy start --target https://api.example.com --trace --only-errors
+    \b
+    Note: Forward proxy mode requires browser proxy configuration.
+    Set your browser's HTTP proxy to 127.0.0.1:8080 (or your --listen address).
     """
     # Import here to avoid circular imports and speed up --help
     from sentinelproxy.proxy import start_proxy
+
+    # Validate mode selection
+    if forward_mode and target:
+        click.echo("Warning: --target is ignored in forward proxy mode", err=True)
+
+    if not forward_mode and not target:
+        raise click.UsageError(
+            "--target is required for reverse proxy mode.\n"
+            "Use --forward for forward proxy mode (captures all browser traffic)."
+        )
 
     # Parse listen address
     host, port = parse_listen_address(listen)
@@ -137,7 +179,7 @@ def start(
     config = ProxyConfig(
         listen_host=host,
         listen_port=port,
-        target=target,
+        target=target or "",
         cert_dir=cert_dir,
         log_dir=log_dir,
         trace=trace,
@@ -148,6 +190,9 @@ def start(
         filter_host=filter_host,
         filter_path=filter_path,
         min_latency=min_latency,
+        cors_rewrite=cors_rewrite,
+        cors_origin=cors_origin,
+        forward_mode=forward_mode,
     )
 
     # Start proxy

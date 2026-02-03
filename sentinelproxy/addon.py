@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from mitmproxy import http, ctx
 from mitmproxy.flow import Flow
 
+from sentinelproxy.config import ProxyConfig
 from sentinelproxy.logger import (
     TrafficEvent,
     TrafficLogger,
@@ -29,6 +30,7 @@ class SentinelAddon:
 
     def __init__(
         self,
+        config: ProxyConfig,
         traffic_logger: TrafficLogger,
         live_display: Optional[LiveDisplay] = None,
         trace_enabled: bool = False,
@@ -36,10 +38,12 @@ class SentinelAddon:
         """Initialize the addon.
 
         Args:
+            config: Proxy configuration
             traffic_logger: TrafficLogger instance for JSONL logging
             live_display: Optional LiveDisplay for real-time tracing
             trace_enabled: Whether live tracing is enabled
         """
+        self._config = config
         self._traffic_logger = traffic_logger
         self._live_display = live_display
         self._trace_enabled = trace_enabled
@@ -60,6 +64,10 @@ class SentinelAddon:
         flow.metadata["sentinel_request_id"] = request_id
         flow.metadata["sentinel_start_time"] = time.time()
 
+        # CORS Header Rewriting
+        if self._config.cors_rewrite:
+            self._rewrite_cors_request_headers(flow)
+
         log.debug(f"Request #{request_id}: {flow.request.method} {flow.request.path}")
 
     def response(self, flow: http.HTTPFlow) -> None:
@@ -67,6 +75,10 @@ class SentinelAddon:
 
         Called when a server response has been received.
         """
+        # CORS Header Rewriting - Response
+        if self._config.cors_rewrite:
+            self._rewrite_cors_response_headers(flow)
+
         # Retrieve request context
         request_id = flow.metadata.get("sentinel_request_id", "unknown")
         start_time = flow.metadata.get("sentinel_start_time", time.time())
@@ -209,3 +221,101 @@ class SentinelAddon:
             request_size=len(req.content) if req.content else 0,
             response_size=len(resp.content) if resp and resp.content else 0,
         )
+
+    # -------------------------------------------------------------------------
+    # CORS Header Rewriting
+    # -------------------------------------------------------------------------
+
+    def _get_target_origin_for_request(self, flow: http.HTTPFlow) -> str:
+        """Get the target origin for CORS rewriting.
+
+        In forward mode: derived from the actual request destination
+        In reverse mode: derived from config.target or config.cors_origin
+
+        Args:
+            flow: The HTTP flow to get the origin for
+
+        Returns:
+            The target origin string (e.g., "https://api.example.com")
+        """
+        # If custom cors_origin is set, always use it
+        if self._config.cors_origin:
+            return self._config.cors_origin
+
+        # In forward mode, derive from the actual request
+        if self._config.forward_mode:
+            req = flow.request
+            scheme = req.scheme
+            host = req.host
+            port = req.port
+
+            # Include port only if non-standard
+            if (scheme == "https" and port != 443) or (scheme == "http" and port != 80):
+                return f"{scheme}://{host}:{port}"
+            return f"{scheme}://{host}"
+
+        # Reverse mode - use configured target
+        parsed = urlparse(self._config.target)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _rewrite_referer_url(self, original_referer: str, target_origin: str) -> str:
+        """Rewrite Referer URL, replacing origin but preserving path.
+
+        Args:
+            original_referer: Original Referer header value
+            target_origin: Target origin to use
+
+        Returns:
+            Rewritten Referer URL
+        """
+        parsed = urlparse(original_referer)
+        # Keep the path portion, replace the origin
+        return f"{target_origin}{parsed.path}"
+
+    def _rewrite_cors_request_headers(self, flow: http.HTTPFlow) -> None:
+        """Rewrite Origin and Referer headers to match target server.
+
+        Stores original values in flow metadata for response rewriting.
+        """
+        target_origin = self._get_target_origin_for_request(flow)
+
+        # Store and rewrite Origin header
+        original_origin = flow.request.headers.get("Origin")
+        if original_origin:
+            flow.metadata["sentinel_original_origin"] = original_origin
+            flow.request.headers["Origin"] = target_origin
+            log.debug(f"CORS: Rewrote Origin from {original_origin} to {target_origin}")
+
+        # Store and rewrite Referer header
+        original_referer = flow.request.headers.get("Referer")
+        if original_referer:
+            flow.metadata["sentinel_original_referer"] = original_referer
+            new_referer = self._rewrite_referer_url(original_referer, target_origin)
+            flow.request.headers["Referer"] = new_referer
+            log.debug(f"CORS: Rewrote Referer from {original_referer} to {new_referer}")
+
+    def _rewrite_cors_response_headers(self, flow: http.HTTPFlow) -> None:
+        """Rewrite Access-Control-Allow-Origin to allow original origin.
+
+        Restores the original origin in CORS response headers so the
+        browser accepts the response.
+        """
+        original_origin = flow.metadata.get("sentinel_original_origin")
+        if not original_origin:
+            return  # No original origin stored, skip
+
+        if not flow.response:
+            return
+
+        allow_origin = flow.response.headers.get("Access-Control-Allow-Origin")
+
+        # If Access-Control-Allow-Origin exists and is not wildcard, rewrite it
+        if allow_origin and allow_origin != "*":
+            flow.response.headers["Access-Control-Allow-Origin"] = original_origin
+            log.debug(
+                f"CORS: Rewrote Access-Control-Allow-Origin from {allow_origin} to {original_origin}"
+            )
+
+        # Handle credentials case: if credentials allowed, origin must be specific
+        if flow.response.headers.get("Access-Control-Allow-Credentials") == "true":
+            flow.response.headers["Access-Control-Allow-Origin"] = original_origin
